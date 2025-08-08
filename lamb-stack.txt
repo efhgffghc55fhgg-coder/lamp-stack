@@ -1,0 +1,283 @@
+ansible-lamp/
+├── inventories/
+│   |── dev/
+│       └── inventory
+│   
+│     
+├── playbook.yml
+│   
+├── roles/
+│   ├── apache/
+│   │   ├── tasks/
+│   │   │   └── main.yml
+│   │   ├── handlers/
+│   │   │   └── main.yml
+│   │   └── templates/
+│   │       └── index.php.j2
+│   ├── mysql/
+│   │   ├── tasks/
+│   │   │   └── main.yml
+│   ├── php/
+│   │   ├── tasks/
+│   │   │   └── main.yml
+│   └── firewall/
+│       ├── tasks/
+│       │   └── main.yml
+├── vars/
+│   └── var.yml
+├── ansible.cfg
+└── README.md
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# playbook.yml
+---
+- name: Deploy LAMP stack
+  hosts: web
+  become: yes
+
+  roles:
+    - apache
+    - php
+    - mysql
+    - firewall
+----------------------------------------------------------------------------------------------------------------------------------
+# inventories/dev/inventory
+[web]
+192.168.1.10 ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa
+-----------------------------------------------------------------------------------------------
+# roles/apache/tasks/main.yml
+---
+- name: Install Apache
+  apt:
+    name: apache2
+    state: present
+    update_cache: yes
+
+- block:
+    - name: Deploy sample index.php
+      template:
+        src: index.php.j2
+        dest: /var/www/html/index.php
+        mode: '0644'
+      notify: Restart Apache
+  rescue:
+    - name: Log failure of Apache index.php deployment
+      debug:
+        msg: "Failed to deploy index.php"
+  always:
+    - name: Always run - ensure Apache is running
+      service:
+        name: apache2
+        state: started
+------------------------------------------------------------------------------------------
+# roles/apache/handlers/main.yml
+
+- name: Restart Apache
+  service:
+    name: apache2
+    state: restarted
+-----------------------------------------------------------------------------------------
+# roles/apache/templates/index.php.j2
+
+<?php
+phpinfo();
+?>
+--------------------------------------------------------------------------------------------
+# roles/php/tasks/main.yml
+---
+- block:
+    - name: Install PHP and required modules
+      apt:
+        name:
+          - php
+          - libapache2-mod-php
+          - php-mysql
+        state: present
+        update_cache: yes
+      notify: Restart Apache
+  rescue:
+    - name: Notify failure in PHP installation
+      debug:
+        msg: "Failed to install PHP or one of the required modules."
+  always:
+    - name: Always run this task after PHP install attempt
+      debug:
+        msg: "PHP installation block finished (success or fail)."
+
+---------------------------------------------------------------------------------------------
+# roles/mysql/tasks/main.yml
+---
+- name: Install pip3
+  apt:
+    name: python3-pip
+    state: present
+    update_cache: yes
+
+- name: Install PyMySQL for Ansible MySQL modules
+  pip:
+    name: PyMySQL
+    executable: pip3
+    extra_args: --break-system-packages
+
+- name: Install MySQL Server
+  apt:
+    name: mysql-server
+    state: present
+    update_cache: yes
+
+- name: Start and enable MySQL
+  service:
+    name: mysql
+    state: started
+    enabled: yes
+
+- name: Update expired MySQL root password using shell (fallback)
+  shell: |
+    mysql -u root --connect-expired-password -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}';"
+  args:
+    executable: /bin/bash
+  ignore_errors: true
+
+- name: Force reset MySQL root password if expired
+  community.mysql.mysql_query:
+    login_user: root
+    login_password: "{{ mysql_root_password }}"
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+    query: "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}';"
+  ignore_errors: true
+
+- name: Reset MySQL root password on first login
+  mysql_user:
+    name: root
+    host: localhost
+    password: "{{ mysql_root_password }}"
+    login_password: "{{ mysql_root_password }}"
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+    check_implicit_admin: true
+    update_password: always
+  no_log: true
+
+- name: Change MySQL root auth plugin to mysql_native_password
+  mysql_user:
+    name: root
+    host: localhost
+    plugin: mysql_native_password
+    login_password: "{{ mysql_root_password }}"
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+    state: present
+
+- name: Set MySQL root password
+  mysql_user:
+    name: root
+    host_all: yes
+    password: "{{ mysql_root_password }}"
+    login_password: "{{ mysql_root_password }}"
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+
+- name: Remove anonymous MySQL users
+  mysql_user:
+    name: ''
+    host_all: yes
+    state: absent
+    login_password: "{{ mysql_root_password }}"
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+
+- name: Remove test database
+  mysql_db:
+    name: test
+    state: absent
+    login_password: "{{ mysql_root_password }}"
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+--------------------------------------------------------------------------------------
+or 
+# roles/mysql/tasks/main.yml
+---
+- name: Install and configure MySQL on localhost
+  hosts: localhost
+  become: yes
+  tasks:
+
+    - name: Set MySQL root password before installation
+      debconf:
+        name: 'mysql-server'
+        question: 'mysql-server/root_password'
+        value: 'MyStrongPass123!'
+        vtype: 'password'
+
+    - name: Confirm MySQL root password again
+      debconf:
+        name: 'mysql-server'
+        question: 'mysql-server/root_password_again'
+        value: 'MyStrongPass123!'
+        vtype: 'password'
+
+    - name: Install MySQL server
+      apt:
+        name: mysql-server
+        state: present
+        update_cache: yes
+
+    - name: Ensure MySQL is running
+      service:
+        name: mysql
+        state: started
+        enabled: yes
+--------------------------------------------------------------------------------------
+# roles/firewall/tasks/main.yml
+---
+- name: Install UFW if not present
+  apt:
+    name: ufw
+    state: present
+    update_cache: yes
+
+- name: Allow SSH
+  ufw:
+    rule: allow
+    name: OpenSSH
+
+- name: Allow HTTP
+  ufw:
+    rule: allow
+    port: 80
+    proto: tcp
+
+- name: Allow HTTPS
+  ufw:
+    rule: allow
+    port: 443
+    proto: tcp
+
+- name: Set default UFW policy to allow
+  ufw:
+    direction: incoming
+    policy: allow
+
+- name: Enable UFW
+  ufw:
+    state: enabled
+
+- name: Verify UFW status and rules
+  shell: ufw status verbose
+  register: ufw_status
+
+- name: Show UFW status output
+  debug:
+    var: ufw_status.stdout
+-----------------------------------------------------------------------------------------------------------------
+# ansible.cfg
+[defaults]
+inventory = /inventories/dev/inventory
+roles_path = ./roles
+remote_user = "{{ ansible_user }}"
+forks = 5
+host_key_cheking = false
+[privilege_escalation]
+become = true
+become_user = root
+become_method = sudo
+become_ask_pass = false
+--------------------------------------------------------------------------------------------------------------------
+# vars/var.yaml
+mysql_root_password: "MyStrongPass123!"
